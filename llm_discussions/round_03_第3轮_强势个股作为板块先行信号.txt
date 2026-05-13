@@ -1,0 +1,74 @@
+============================================================
+第3轮：强势个股作为板块先行信号
+============================================================
+
+基于“个股→板块信号传导”框架，设计如下可落地方案：
+
+### 1. 量化个股领先板块的程度
+**指标：领先强度（Lead_Score）**
+- 计算个股与板块指数的相对强弱：
+  - `RS_individual = (个股5日涨幅 - 板块5日涨幅) / 板块5日波动率`
+  - `RS_volume = 个股5日均量 / 20日均量`
+- 领先强度阈值：`RS_individual > 1.5` 且 `RS_volume > 1.3`
+
+### 2. 强势股数量阈值
+**动态阈值（Dynamic_Threshold）**
+- 基于板块成分股数量N，计算历史分位数：
+  - 基准阈值 = `max(3, N * 0.1)` （至少3只）
+  - 若近期强势股数量突破90%分位数，激活预警
+
+### 3. 区分独立行情 vs 集体启动
+**协同因子（Synergy_Factor）**
+- 计算板块内强势股的相关性矩阵：
+  - 取5日收益率序列，计算平均相关系数ρ
+  - 若ρ > 0.6且强势股数量≥阈值，判定为集体启动
+  - 若ρ < 0.3，判定为独立行情
+- 辅助指标：板块内涨幅离散度（标准差/均值），离散度低则倾向集体性
+
+### 4. 历史成功模式特征
+**模式库匹配（Pattern_Matching）**
+- 提取成功案例（后续20日板块涨幅>10%）的特征向量：
+  - 领先强度均值、强势股数量、恐贪指数、协同因子
+- 使用K近邻（K=5）计算当前特征与历史成功模式的相似度
+- 相似度 > 0.7 时增强信号置信度
+
+### 5. 检测伪代码
+```python
+def detect_signal(sector_stocks, sector_index, fear_greed_index, hist_patterns):
+    # 1. 计算个股领先强度
+    leaders = []
+    for stock in sector_stocks:
+        rs_ind = (stock.ret_5d - sector_index.ret_5d) / sector_index.vol_5d
+        rs_vol = stock.avg_vol_5d / stock.avg_vol_20d
+        if rs_ind > 1.5 and rs_vol > 1.3:
+            leaders.append(stock)
+    
+    # 2. 动态阈值检查
+    N = len(sector_stocks)
+    threshold = max(3, int(N * 0.1))
+    if len(leaders) < threshold:
+        return None
+    
+    # 3. 区分独立行情 vs 集体启动
+    if len(leaders) >= 2:
+        ret_matrix = np.array([s.ret_5d for s in leaders])
+        corr = np.corrcoef(ret_matrix).mean()
+        dispersion = np.std([s.ret_5d for s in leaders]) / np.mean([s.ret_5d for s in leaders])
+        if corr < 0.3 or dispersion > 0.5:
+            return "独立行情"
+    else:
+        corr = 0  # 单只无法计算相关
+    
+    # 4. 结合恐贪指数
+    if fear_greed_index >= 40:
+        return None  # 非恐慌环境，反转概率低
+    
+    # 5. 历史模式匹配
+    current_features = [np.mean([rs_ind...]), len(leaders), fear_greed_index, corr]
+    distances, _ = KNN(hist_patterns, current_features, k=5)
+    similarity = 1 / (1 + np.mean(distances))
+    
+    if similarity > 0.7:
+        return {"signal": "板块反转预警", "confidence": similarity}
+    return None
+```

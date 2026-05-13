@@ -1,0 +1,98 @@
+============================================================
+第1轮：个股强度因子体系优化
+============================================================
+
+### 1) 需增加的因子
+- **波动率因子**：用ATR(14)衡量，过高（妖股）或过低（僵尸股）均扣分，中等最优。
+- **换手率因子**：异常高换手（>20%）扣分，健康换手（3%-10%）加分。
+- **连板天数因子**：连板数越多，风险越高，指数衰减扣分。
+- **偏离均线因子**：价格偏离60日均线幅度，过大时（>50%）衰减趋势得分。
+
+### 2) 权重优化
+采用动态权重，基于市场状态（趋势/震荡）调整：
+- **趋势市**：趋势强度权重升至35%，动量升至25%，价格位置降至20%。
+- **震荡市**：价格位置权重升至40%，量价配合升至25%，趋势强度降至20%。
+- 使用ADX(14)判断：ADX>25为趋势市，否则震荡市。
+
+### 3) 避免高位钝化
+引入**相对位置衰减系数**：
+- 计算价格在历史(90天)内的分位数`pct_rank`。
+- 当`pct_rank > 0.9`时，对价格位置、趋势、动量得分乘以衰减系数：`decay = 1 - (pct_rank - 0.9) * 2`，最低降至0.2。
+- 强制限制：若阶段涨幅>300%，价格位置得分上限50分。
+
+### 4) 大小票权重差异
+- **大票（市值>500亿）**：降低换手率权重（大票换手天然低），提高趋势权重（机构主导趋势强）。
+- **小票（市值<100亿）**：提高波动率和连板权重，趋势权重降低（游资驱动，波动大）。
+- 通过市值因子`cap_weight`动态调整子权重。
+
+### 5) 改进后因子伪代码
+```python
+# 输入：stock_data (90天OHLCV, 市值), market_state (ADX)
+# 输出：strength_score (0-100)
+
+def calculate_strength(stock_data, market_state):
+    # 基础因子计算
+    price_pos = calc_price_position(stock_data)      # 0-30分
+    trend_str = calc_trend_strength(stock_data)      # 0-25分
+    momentum = calc_momentum(stock_data)             # 0-20分
+    vol_price = calc_volume_price_match(stock_data)  # 0-15分
+    limit_up = calc_limit_up_score(stock_data)       # 0-10分
+
+    # 新增因子
+    atr_score = calc_atr_score(stock_data)           # 波动率得分 0-10分
+    turnover_score = calc_turnover_score(stock_data) # 换手率得分 0-10分
+    streak_penalty = calc_streak_penalty(stock_data) # 连板扣分 -5~0分
+    deviation_decay = calc_deviation_decay(stock_data) # 偏离衰减系数 0.5-1.0
+
+    # 高位钝化处理
+    pct_rank = calc_percentile_rank(stock_data, 90)
+    if pct_rank > 0.9:
+        decay = max(0.2, 1 - (pct_rank - 0.9) * 2)
+        price_pos *= decay
+        trend_str *= decay
+        momentum *= decay
+    if calc_stage_return(stock_data) > 3.0:  # 阶段涨幅>300%
+        price_pos = min(price_pos, 15)       # 上限30*0.5
+
+    # 大小票权重调整
+    cap = stock_data['market_cap'][-1]
+    if cap > 500e8:  # 大票
+        w_trend, w_momentum, w_turnover = 1.2, 1.0, 0.5
+    elif cap < 100e8:  # 小票
+        w_trend, w_momentum, w_turnover = 0.8, 0.9, 1.5
+    else:
+        w_trend, w_momentum, w_turnover = 1.0, 1.0, 1.0
+
+    # 动态权重（基于市场状态）
+    if market_state == 'trending':  # ADX>25
+        weights = {
+            'price_pos': 0.20, 'trend_str': 0.35 * w_trend,
+            'momentum': 0.25 * w_momentum, 'vol_price': 0.10,
+            'limit_up': 0.05, 'atr': 0.03, 'turnover': 0.02 * w_turnover
+        }
+    else:  # 震荡市
+        weights = {
+            'price_pos': 0.40, 'trend_str': 0.20 * w_trend,
+            'momentum': 0.15 * w_momentum, 'vol_price': 0.15,
+            'limit_up': 0.05, 'atr': 0.03, 'turnover': 0.02 * w_turnover
+        }
+
+    # 综合得分
+    score = (
+        price_pos * weights['price_pos'] +
+        trend_str * weights['trend_str'] * deviation_decay +
+        momentum * weights['momentum'] * deviation_decay +
+        vol_price * weights['vol_price'] +
+        limit_up * weights['limit_up'] +
+        atr_score * weights['atr'] +
+        turnover_score * weights['turnover'] +
+        streak_penalty
+    )
+    return min(100, max(0, score))
+```
+
+### 关键函数说明
+- `calc_atr_score`: 计算ATR(14)的z-score，映射到[0,10]，极端值给低分。
+- `calc_turnover_score`: 换手率在3%-10%得满分，<1%或>20%递减。
+- `calc_streak_penalty`: `-min(5, 连板数*0.5)`，指数衰减。
+- `calc_deviation_decay`: `1 - min(0.5, max(0, (close/ma60 - 1.5) * 0.5))`。

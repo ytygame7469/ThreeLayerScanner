@@ -1,0 +1,170 @@
+============================================================
+第8轮：多时间框架共振分析
+============================================================
+
+以下是多周期共振系统的精简方案：
+
+## 1. 各周期具体指标
+
+### 日线(90天短线)
+- **强度指标**: RSI(14) > 60 且 MACD金叉
+- **趋势**: MA20 > MA60 且价格在MA20上方
+- **动量**: 近5日涨幅 > 3%
+
+### 周线(52周中线)  
+- **位置指标**: (当前价-52周最低)/(52周最高-52周最低)
+- **高/低判断**: 位置>0.7为高区，<0.3为低区
+- **趋势**: 周线MACD柱状图方向
+
+### 月线(24月长线)
+- **位置指标**: (当前价-24月最低)/(24月最高-24月最低)
+- **高/低判断**: 位置>0.8为高区，<0.2为低区
+- **趋势**: 月线布林带位置
+
+## 2. 共振强度量化
+
+```python
+def calc_resonance_score(daily_strength, weekly_position, monthly_position):
+    """
+    共振强度 = 日线强度 × 周线权重 × 月线权重
+    权重根据位置动态调整
+    """
+    # 周线权重：低区买点权重高
+    if weekly_position < 0.3:
+        weekly_weight = 1.5
+    elif weekly_position > 0.7:
+        weekly_weight = 0.5
+    else:
+        weekly_weight = 1.0
+    
+    # 月线权重：低区买点权重最高
+    if monthly_position < 0.2:
+        monthly_weight = 2.0
+    elif monthly_position > 0.8:
+        monthly_weight = 0.3
+    else:
+        monthly_weight = 1.0
+    
+    return daily_strength * weekly_weight * monthly_weight
+```
+
+## 3. 不同模式对应策略
+
+### 模式1: 日强+周涨+月低 (最佳买点)
+- **仓位**: 80%仓位
+- **止损**: -5%
+- **止盈**: +15% 或 周线位置>0.7
+- **加仓**: 回踩周线MA10加20%
+
+### 模式2: 日强+周高+月高 (追高风险)
+- **仓位**: 30%仓位
+- **止损**: -3% 严格止损
+- **止盈**: +8% 快速止盈
+- **持仓**: 不超过3个交易日
+
+## 4. 完整伪代码
+
+```python
+class MultiPeriodResonance:
+    def __init__(self):
+        self.daily_period = 90
+        self.weekly_period = 52
+        self.monthly_period = 24
+        
+    def calc_daily_strength(self, data):
+        """日线强度 0-1"""
+        rsi = talib.RSI(data['close'], 14)
+        macd, signal, hist = talib.MACD(data['close'])
+        ma20 = talib.SMA(data['close'], 20)
+        ma60 = talib.SMA(data['close'], 60)
+        
+        # 计算5日涨幅
+        ret_5d = (data['close'][-1] / data['close'][-5] - 1) * 100
+        
+        # 评分系统
+        score = 0
+        if rsi[-1] > 60: score += 0.3
+        if macd[-1] > signal[-1]: score += 0.3
+        if ma20[-1] > ma60[-1]: score += 0.2
+        if data['close'][-1] > ma20[-1]: score += 0.1
+        if ret_5d > 3: score += 0.1
+        
+        return score
+    
+    def calc_weekly_position(self, weekly_data):
+        """周线位置 0-1"""
+        high_52w = max(weekly_data['high'][-52:])
+        low_52w = min(weekly_data['low'][-52:])
+        current_price = weekly_data['close'][-1]
+        
+        position = (current_price - low_52w) / (high_52w - low_52w)
+        return position
+    
+    def calc_monthly_position(self, monthly_data):
+        """月线位置 0-1"""
+        high_24m = max(monthly_data['high'][-24:])
+        low_24m = min(monthly_data['low'][-24:])
+        current_price = monthly_data['close'][-1]
+        
+        position = (current_price - low_24m) / (high_24m - low_24m)
+        return position
+    
+    def detect_pattern(self, daily_score, weekly_pos, monthly_pos):
+        """检测共振模式"""
+        daily_strong = daily_score >= 0.7
+        
+        # 周线趋势判断
+        weekly_macd = talib.MACD(weekly_data['close'])
+        weekly_rising = weekly_macd[0][-1] > weekly_macd[0][-2]
+        
+        # 模式判断
+        if daily_strong and weekly_rising and monthly_pos < 0.2:
+            return "BEST_BUY"
+        elif daily_strong and weekly_pos > 0.7 and monthly_pos > 0.8:
+            return "CHASE_HIGH"
+        else:
+            return "NONE"
+    
+    def generate_signal(self, stock_data):
+        """主信号生成函数"""
+        # 准备多周期数据
+        daily_data = stock_data['daily'][-self.daily_period:]
+        weekly_data = stock_data['weekly'][-self.weekly_period:]
+        monthly_data = stock_data['monthly'][-self.monthly_period:]
+        
+        # 计算各周期指标
+        daily_score = self.calc_daily_strength(daily_data)
+        weekly_pos = self.calc_weekly_position(weekly_data)
+        monthly_pos = self.calc_monthly_position(monthly_data)
+        
+        # 检测模式
+        pattern = self.detect_pattern(daily_score, weekly_pos, monthly_pos)
+        
+        # 计算共振强度
+        resonance = calc_resonance_score(daily_score, weekly_pos, monthly_pos)
+        
+        # 根据模式返回策略
+        if pattern == "BEST_BUY":
+            return {
+                'signal': 'BUY',
+                'position': 0.8,
+                'stop_loss': -0.05,
+                'take_profit': 0.15,
+                'resonance': resonance
+            }
+        elif pattern == "CHASE_HIGH":
+            return {
+                'signal': 'BUY',
+                'position': 0.3,
+                'stop_loss': -0.03,
+                'take_profit': 0.08,
+                'resonance': resonance
+            }
+        else:
+            return {'signal': 'HOLD', 'position': 0}
+
+# 使用示例
+system = MultiPeriodResonance()
+signal = system.generate_signal(stock_data_dict)
+print(f"信号: {signal['signal']}, 仓位: {signal['position']*100}%")
+```

@@ -1,0 +1,183 @@
+============================================================
+第2轮：轮动涨停精确检测算法
+============================================================
+
+## 板块轮动精确检测算法
+
+### 核心指标定义
+
+**轮动度 = 板块内涨停股票更换频率**
+**轮动质量 = 轮动度 × 涨停扩散率 × 持续性得分**
+
+### 数据结构
+
+```
+StockDaily:
+  stock_code, date, is_limit_up, sector, 
+  consecutive_limit_days  // 连续涨停天数
+
+SectorDaily:
+  date, sector, limit_stocks[], 
+  new_limit_stocks[],      // 首次涨停（前N日未涨停）
+  rotation_degree, quality_score
+```
+
+### 算法伪代码
+
+```python
+class SectorRotationDetector:
+    def __init__(self, window=5, threshold=0.6):
+        self.window = window  # 观察窗口
+        self.threshold = threshold
+        self.sector_history = {}  # sector -> deque of daily sets
+        
+    def detect_daily_rotation(self, date, sector):
+        """每日轮动检测主函数"""
+        # 1. 获取板块涨停股票集合
+        limit_stocks = get_limit_up_stocks(date, sector)
+        
+        # 2. 识别新晋涨停（前3日未涨停）
+        prev_3d_stocks = self._get_prev_n_days_stocks(sector, date, 3)
+        new_limit = limit_stocks - prev_3d_stocks
+        
+        # 3. 识别龙头连板
+        dragon_stocks = self._identify_dragons(limit_stocks, date)
+        
+        # 4. 计算轮动度
+        rotation_degree = self._calc_rotation_degree(
+            sector, date, limit_stocks, new_limit, dragon_stocks
+        )
+        
+        # 5. 计算轮动质量
+        quality = self._calc_quality(
+            sector, date, limit_stocks, new_limit, rotation_degree
+        )
+        
+        return {
+            'date': date,
+            'sector': sector,
+            'limit_count': len(limit_stocks),
+            'new_limit_count': len(new_limit),
+            'dragon_count': len(dragon_stocks),
+            'rotation_degree': rotation_degree,
+            'quality_score': quality,
+            'is_genuine_rotation': quality > self.threshold
+        }
+    
+    def _identify_dragons(self, limit_stocks, date):
+        """识别龙头连板股（连续涨停>=2天）"""
+        dragons = set()
+        for stock in limit_stocks:
+            consecutive = get_consecutive_limit_days(stock, date)
+            if consecutive >= 2:
+                dragons.add(stock)
+        return dragons
+    
+    def _calc_rotation_degree(self, sector, date, 
+                               current, new_limit, dragons):
+        """轮动度 = 新晋涨停占比 × 非龙头占比"""
+        if len(current) == 0:
+            return 0
+        
+        # 新晋涨停占比
+        new_ratio = len(new_limit) / len(current)
+        
+        # 非龙头占比（龙头连板降低轮动度）
+        non_dragon = current - dragons
+        non_dragon_ratio = len(non_dragon) / len(current) if current else 0
+        
+        # 与前一日股票重叠度（重叠越低轮动越高）
+        prev_stocks = self._get_prev_n_days_stocks(sector, date, 1)
+        overlap = len(current & prev_stocks)
+        turnover_ratio = 1 - (overlap / len(current)) if current else 0
+        
+        # 综合轮动度
+        rotation = (new_ratio * 0.4 + 
+                   non_dragon_ratio * 0.3 + 
+                   turnover_ratio * 0.3)
+        
+        return rotation
+    
+    def _calc_quality(self, sector, date, 
+                      limit_stocks, new_limit, rotation_degree):
+        """轮动质量评估"""
+        # 1. 涨停扩散率：板块内涨停占比
+        total_sector_stocks = get_sector_stock_count(sector)
+        diffusion = len(limit_stocks) / total_sector_stocks
+        
+        # 2. 持续性得分：近window日轮动趋势
+        persistence = self._calc_persistence(sector, date)
+        
+        # 3. 新增涨停质量：新晋涨停是否带动板块
+        new_quality = self._calc_new_limit_quality(new_limit, date)
+        
+        # 综合质量评分
+        quality = (rotation_degree * 0.4 + 
+                  diffusion * 0.2 + 
+                  persistence * 0.25 + 
+                  new_quality * 0.15)
+        
+        return quality
+    
+    def _calc_persistence(self, sector, date):
+        """持续性：轮动是否持续多日"""
+        scores = []
+        for i in range(1, self.window + 1):
+            d = get_trading_day(date, -i)
+            if d in self.sector_history.get(sector, {}):
+                hist = self.sector_history[sector][d]
+                # 当日有新晋涨停且非同一批股票
+                if hist['new_limit_count'] > 0:
+                    scores.append(1)
+                else:
+                    scores.append(0)
+        
+        if not scores:
+            return 0
+        
+        # 近期持续性加权
+        weights = [0.5, 0.3, 0.15, 0.05, 0]  # 越近权重越高
+        weighted_sum = sum(s * w for s, w in zip(scores[:5], weights[:len(scores)]))
+        return weighted_sum
+    
+    def _calc_new_limit_quality(self, new_limit, date):
+        """新晋涨停质量：是否带动板块内其他股票上涨"""
+        if not new_limit:
+            return 0
+        
+        quality_sum = 0
+        for stock in new_limit:
+            # 检查涨停原因（是否板块联动）
+            sector_correlation = get_sector_correlation(stock, date)
+            # 检查成交量放大
+            volume_ratio = get_volume_ratio(stock, date)
+            
+            stock_quality = (sector_correlation * 0.6 + 
+                           min(volume_ratio / 3, 1) * 0.4)
+            quality_sum += stock_quality
+        
+        return quality_sum / len(new_limit)
+```
+
+### 评分公式
+
+```
+轮动度 R = α×新晋占比 + β×非龙头占比 + γ×换手率
+         α=0.4, β=0.3, γ=0.3
+
+质量分 Q = ω1×R + ω2×扩散率 + ω3×持续性 + ω4×新涨停质量
+         ω1=0.4, ω2=0.2, ω3=0.25, ω4=0.15
+
+真轮动判定：Q > 0.6 且 新晋涨停数 >= 2
+龙头连板判定：连续涨停>=2天且当日涨停
+```
+
+### 关键区分逻辑
+
+| 特征 | 龙头连板 | 板块轮动 |
+|------|---------|---------|
+| 涨停股票 | 固定1-2只 | 每日更换 |
+| 新晋涨停 | 少 | 多（>=2只） |
+| 轮动度 | <0.3 | >0.6 |
+| 持续性 | 龙头持续 | 轮动持续 |
+| 质量分 | 低（无扩散） | 高（有扩散） |
